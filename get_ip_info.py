@@ -92,6 +92,7 @@ def get_ip_info(driver, ip, retry_count=2):
         '国家/地区': '',
         'ASN': '',
         '企业': '',
+        '使用场景': '',
         'IP评分': '',
         '备注': '',
         '地理位置': '',
@@ -102,6 +103,13 @@ def get_ip_info(driver, ip, retry_count=2):
         '公共代理': '',
         '代理类型': '',
         '标签': '',
+        'IP情报-使用类型': '',
+        'IP情报-威胁': '',
+        'IP情报-IP类型': '',
+        'IP情报-提供商': '',
+        'IP情报-公共代理': '',
+        'IP情报-代理类型': '',
+        'IP情报-标签': '',
         '查询状态': ''
     }
 
@@ -147,15 +155,59 @@ def get_ip_info(driver, ip, retry_count=2):
                     value = value_elem.text.strip()
 
                     if '数字地址' in label:
-                        match = re.match(r'(\d+)', value)
-                        if match:
-                            result['数字地址'] = match.group(1)
+                        # 先尝试点击“小眼睛”显示完整数字地址，再提取纯数字
+                        numeric_text = value
+                        try:
+                            eye_icons = value_elem.find_elements(
+                                By.CSS_SELECTOR,
+                                'span.js-tool-remove[title*="显示"], span.js-tool-remove[title*="点击显示"], span.js-tool-remove[title*="IP"]'
+                            )
+                            if eye_icons and '*' in numeric_text:
+                                try:
+                                    eye_icons[0].click()
+                                except Exception:
+                                    driver.execute_script("arguments[0].click();", eye_icons[0])
+
+                                try:
+                                    WebDriverWait(driver, 5).until(
+                                        lambda d: '*' not in value_elem.text
+                                    )
+                                except Exception:
+                                    pass
+
+                                numeric_text = value_elem.text.strip()
+                        except Exception:
+                            numeric_text = value
+
+                        digits_only = ''.join(re.findall(r'\d+', numeric_text))
+                        if digits_only:
+                            result['数字地址'] = digits_only
+                        else:
+                            first_token = numeric_text.split()[0] if numeric_text else ''
+                            result['数字地址'] = first_token
                     elif '国家' in label or '地区' in label:
-                        result['国家/地区'] = value
+                        # 尝试把国旗 alt（如 China）与文本（如 中国）拼接为 China中国
+                        country_text = value
+                        try:
+                            flag_imgs = value_elem.find_elements(By.TAG_NAME, 'img')
+                            if flag_imgs:
+                                alt = (flag_imgs[0].get_attribute('alt') or '').strip()
+                                text_only = (value_elem.text or '').strip()
+                                if alt and text_only:
+                                    country_text = text_only if alt in text_only else f"{alt}{text_only}"
+                                elif alt:
+                                    country_text = alt
+                        except Exception:
+                            pass
+                        result['国家/地区'] = country_text
                     elif 'ASN' in label:
                         result['ASN'] = value
                     elif '企业' in label:
                         result['企业'] = value
+                    elif '使用场景' in label:
+                        result['使用场景'] = value
+                        if not result['使用类型']:
+                            result['使用类型'] = value
                     elif '备注' in label:
                         result['备注'] = value
                 except:
@@ -181,29 +233,51 @@ def get_ip_info(driver, ip, retry_count=2):
             result['地理位置'] = location
 
             # 获取IP情报
-            intel_section = safe_find_text(driver, By.ID, 'ip-intelligence')
-            if intel_section:
-                lines = intel_section.split('\n')
-                current_key = ''
-                for line in lines:
-                    line = line.strip()
-                    if '使用类型:' in line:
-                        current_key = '使用类型'
-                    elif '威胁:' in line:
-                        current_key = '威胁'
-                    elif 'IP类型:' in line:
-                        current_key = 'IP类型'
-                    elif '提供商:' in line:
-                        current_key = '提供商'
-                    elif '公共代理:' in line:
-                        current_key = '公共代理'
-                    elif '代理类型:' in line:
-                        current_key = '代理类型'
-                    elif '标签:' in line:
-                        current_key = '标签'
-                    elif current_key and line and line != '-':
-                        if not result[current_key]:
-                            result[current_key] = line
+            try:
+                intel_elem = driver.find_element(By.ID, 'ip-intelligence')
+                span_elems = intel_elem.find_elements(By.CSS_SELECTOR, 'span')
+
+                label_to_key = {
+                    '使用类型': 'IP情报-使用类型',
+                    '威胁': 'IP情报-威胁',
+                    'IP类型': 'IP情报-IP类型',
+                    '提供商': 'IP情报-提供商',
+                    '公共代理': 'IP情报-公共代理',
+                    '代理类型': 'IP情报-代理类型',
+                    '标签': 'IP情报-标签',
+                }
+                legacy_keys = {'使用类型', '威胁', 'IP类型', '提供商', '公共代理', '代理类型', '标签'}
+
+                i = 0
+                while i < len(span_elems):
+                    strongs = span_elems[i].find_elements(By.TAG_NAME, 'strong')
+                    if not strongs:
+                        i += 1
+                        continue
+
+                    raw_label = strongs[0].text.strip().rstrip(':：')
+                    key = label_to_key.get(raw_label)
+
+                    value = ''
+                    if i + 1 < len(span_elems):
+                        next_has_strong = span_elems[i + 1].find_elements(By.TAG_NAME, 'strong')
+                        if not next_has_strong:
+                            value = span_elems[i + 1].text.strip()
+                            i += 1
+
+                    # IP情报字段需要保留“-”等占位值，因此不跳过 value == '-'
+                    if key and value and not result.get(key):
+                        result[key] = value
+
+                    # 兼容原有字段：仅在有实际值（非 '-'）时回填
+                    if raw_label in legacy_keys and value and value != '-' and not result.get(raw_label):
+                        result[raw_label] = value
+                        if raw_label == '使用类型' and not result.get('使用场景'):
+                            result['使用场景'] = value
+
+                    i += 1
+            except NoSuchElementException:
+                pass
 
             result['查询状态'] = '成功'
             return result
@@ -368,7 +442,7 @@ def extract_ips_from_column(df, column_name):
 def main():
     # ==================== 用户配置区域 ====================
     # 输入文件路径（支持 .csv, .xlsx, .xls 格式）
-    INPUT_FILE = r'E:\AAAAAcodedata\getiplarkusage\testIP.xlsx'
+    INPUT_FILE = r'E:\AAAAAcodedata\getiplarkinfo\testip.xlsx'
 
     # 输出目录（留空则与输入文件同目录）
     OUTPUT_DIR = r''
@@ -454,8 +528,9 @@ def main():
     # ===== 文件1: 纯查询结果 =====
     df_result = pd.DataFrame(results)
     columns_order = ['IP', '类型', 'IP属性', '国家/地区', '地理位置', 'ASN', '企业',
-                     'IP评分', '使用类型', 'IP类型', '公共代理', '威胁', '代理类型',
-                     '标签', '数字地址', '备注', '查询状态']
+                     '使用场景', 'IP评分', 'IP情报-使用类型', 'IP情报-威胁',
+                     'IP情报-IP类型', 'IP情报-提供商', 'IP情报-公共代理',
+                     'IP情报-代理类型', 'IP情报-标签', '数字地址', '备注', '查询状态']
     columns_order = [c for c in columns_order if c in df_result.columns]
     df_result = df_result[columns_order]
     df_result.to_excel(output_file_1, index=False, engine='openpyxl')
@@ -463,11 +538,15 @@ def main():
 
     # ===== 文件2: 原表 + 查询结果 =====
     # 要追加的列（不包含IP列，因为原表已有）
-    append_columns = ['查询_类型', '查询_IP属性', '查询_国家地区', '查询_地理位置',
-                      '查询_ASN', '查询_企业', '查询_IP评分', '查询_使用类型',
-                      '查询_IP类型', '查询_公共代理', '查询_状态']
-    result_keys = ['类型', 'IP属性', '国家/地区', '地理位置', 'ASN', '企业',
-                   'IP评分', '使用类型', 'IP类型', '公共代理', '查询状态']
+    append_columns = ['查询_类型', '查询_使用场景', '查询_IP属性', '查询_国家地区',
+                      '查询_地理位置', '查询_ASN', '查询_企业', '查询_IP评分',
+                      '查询_数字地址', '查询_备注', 'IP情报-使用类型', 'IP情报-威胁',
+                      'IP情报-IP类型', 'IP情报-提供商', 'IP情报-公共代理',
+                      'IP情报-代理类型', 'IP情报-标签', '查询_状态']
+    result_keys = ['类型', '使用场景', 'IP属性', '国家/地区', '地理位置', 'ASN',
+                   '企业', 'IP评分', '数字地址', '备注', 'IP情报-使用类型',
+                   'IP情报-威胁', 'IP情报-IP类型', 'IP情报-提供商', 'IP情报-公共代理',
+                   'IP情报-代理类型', 'IP情报-标签', '查询状态']
 
     # 初始化新列
     for col in append_columns:
