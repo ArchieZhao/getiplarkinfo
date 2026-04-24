@@ -31,6 +31,12 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
 
+GEO_SOURCES = [
+    'Ip-api', 'Moe', 'Moe+', 'Ease', 'Internet', 'Maxmind', 'Ipstack',
+    'IPinfo', 'IP2Location', 'Digital Element', 'DB-IP',
+    'Aliyun', 'TencentCloud', 'Cloudflare',
+]
+
 
 def setup_driver():
     """配置并启动Chrome浏览器"""
@@ -95,7 +101,6 @@ def get_ip_info(driver, ip, retry_count=2):
         '使用场景': '',
         'IP评分': '',
         '备注': '',
-        '地理位置': '',
         '使用类型': '',
         '威胁': '',
         'IP类型': '',
@@ -112,6 +117,8 @@ def get_ip_info(driver, ip, retry_count=2):
         'IP情报-标签': '',
         '查询状态': ''
     }
+    for src in GEO_SOURCES:
+        result[f'地理位置-{src}'] = ''
 
     for attempt in range(retry_count + 1):
         try:
@@ -224,13 +231,18 @@ def get_ip_info(driver, ip, retry_count=2):
                     score = ratio.split('/')[0]
             result['IP评分'] = score
 
-            # 获取地理位置（取第一个来源）
-            location = safe_find_text(driver, By.ID, 'location-info1')
-            if not location:
-                geo_sources = driver.find_elements(By.CSS_SELECTOR, '.geo-source span:not(.source-tag)')
-                if geo_sources:
-                    location = geo_sources[0].text.strip()
-            result['地理位置'] = location
+            # 获取地理位置（多源对比）
+            geo_source_divs = driver.find_elements(By.CSS_SELECTOR, '.geo-source')
+            for geo_div in geo_source_divs:
+                try:
+                    source_tag = geo_div.find_element(By.CSS_SELECTOR, '.source-tag').text.strip()
+                    value_spans = geo_div.find_elements(By.CSS_SELECTOR, 'span:not(.source-tag)')
+                    geo_text = ' '.join(s.text.strip() for s in value_spans if s.text.strip())
+                    key = f'地理位置-{source_tag}'
+                    if key in result:
+                        result[key] = geo_text
+                except:
+                    continue
 
             # 获取IP情报
             try:
@@ -527,10 +539,12 @@ def main():
 
     # ===== 文件1: 纯查询结果 =====
     df_result = pd.DataFrame(results)
-    columns_order = ['IP', '类型', 'IP属性', '国家/地区', '地理位置', 'ASN', '企业',
-                     '使用场景', 'IP评分', 'IP情报-使用类型', 'IP情报-威胁',
-                     'IP情报-IP类型', 'IP情报-提供商', 'IP情报-公共代理',
-                     'IP情报-代理类型', 'IP情报-标签', '数字地址', '备注', '查询状态']
+    geo_columns = [f'地理位置-{src}' for src in GEO_SOURCES]
+    columns_order = ['IP', '类型', 'IP属性', '国家/地区'] + geo_columns + [
+                     'ASN', '企业', '使用场景', 'IP评分', 'IP情报-使用类型',
+                     'IP情报-威胁', 'IP情报-IP类型', 'IP情报-提供商',
+                     'IP情报-公共代理', 'IP情报-代理类型', 'IP情报-标签',
+                     '数字地址', '备注', '查询状态']
     columns_order = [c for c in columns_order if c in df_result.columns]
     df_result = df_result[columns_order]
     df_result.to_excel(output_file_1, index=False, engine='openpyxl')
@@ -538,13 +552,17 @@ def main():
 
     # ===== 文件2: 原表 + 查询结果 =====
     # 要追加的列（不包含IP列，因为原表已有）
-    append_columns = ['查询_类型', '查询_使用场景', '查询_IP属性', '查询_国家地区',
-                      '查询_地理位置', '查询_ASN', '查询_企业', '查询_IP评分',
+    geo_append_cols = [f'查询_地理位置-{src}' for src in GEO_SOURCES]
+    geo_result_keys = [f'地理位置-{src}' for src in GEO_SOURCES]
+    append_columns = ['查询_类型', '查询_使用场景', '查询_IP属性', '查询_国家地区'
+                      ] + geo_append_cols + [
+                      '查询_ASN', '查询_企业', '查询_IP评分',
                       '查询_数字地址', '查询_备注', 'IP情报-使用类型', 'IP情报-威胁',
                       'IP情报-IP类型', 'IP情报-提供商', 'IP情报-公共代理',
                       'IP情报-代理类型', 'IP情报-标签', '查询_状态']
-    result_keys = ['类型', '使用场景', 'IP属性', '国家/地区', '地理位置', 'ASN',
-                   '企业', 'IP评分', '数字地址', '备注', 'IP情报-使用类型',
+    result_keys = ['类型', '使用场景', 'IP属性', '国家/地区'
+                   ] + geo_result_keys + [
+                   'ASN', '企业', 'IP评分', '数字地址', '备注', 'IP情报-使用类型',
                    'IP情报-威胁', 'IP情报-IP类型', 'IP情报-提供商', 'IP情报-公共代理',
                    'IP情报-代理类型', 'IP情报-标签', '查询状态']
 
