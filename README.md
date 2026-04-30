@@ -1,6 +1,6 @@
 # IP信息查询工具
 
-从 Excel/CSV 文件中读取 IP 地址，自动查询 [iplark.com](https://iplark.com/) 获取详细信息，包括：类型、国家/地区、ASN、企业、使用场景、IP评分与 IP 情报等。
+从 Excel/CSV 文件或命令行参数读取 IP 地址，自动查询 [iplark.com](https://iplark.com/) 获取详细信息，包括：类型、国家/地区、ASN、企业、使用场景、IP评分与 IP 情报等。
 
 ## 功能特点
 
@@ -10,6 +10,8 @@
 - 自动生成两个结果文件：
   - 纯查询结果表
   - 原表 + 查询结果追加列（Excel 会保留原有多个工作表及其名称）
+- 支持 `-ip` 直接传入一个或多个 IP，不需要准备输入表格
+- 支持从历史查询结果中筛选失败 IP 重试，也支持手动指定一个或多个 IP 重试
 - 适配 iplark 新版页面结构：
   - “数字地址”会先点击小眼睛显示完整数字，再提取纯数字
   - “国家/地区”会拼接国旗 alt 与文本（例如 `China中国`）
@@ -59,7 +61,7 @@ python -m pip install pandas selenium openpyxl xlrd
 
 选择对应系统的 `chrome` 版本下载，解压到任意目录，例如：
 ```
-D:\Program\chrome-win64\chrome.exe
+C:\path\to\chrome.exe
 ```
 
 ### 2. 下载 ChromeDriver
@@ -70,31 +72,41 @@ D:\Program\chrome-win64\chrome.exe
 
 下载后解压到任意目录，例如：
 ```
-D:\Program\chromedriver-win64\chromedriver.exe
+C:\path\to\chromedriver.exe
 ```
 
 ### 3. 查看 Chrome 版本
 
 打开 Chrome，访问 `chrome://version/`，查看版本号（如 `130.0.6723.58`）。
 
-### 4. 修改脚本中的路径
+### 4. 配置浏览器路径
 
-打开 `get_ip_info.py`，找到 `setup_driver` 函数，修改以下两行：
+如果 ChromeDriver 已在系统 PATH 中，通常无需额外配置。需要指定独立 Chrome 或 ChromeDriver 时，可以设置环境变量：
 
-```python
-def setup_driver():
-    """配置并启动Chrome浏览器"""
-    chrome_driver_path = r'D:\Program\chromedriver-win64\chromedriver.exe'  # 修改为你的路径
-    chrome_binary_path = r'D:\Program\chrome-win64\chrome.exe'              # 修改为你的路径
+```powershell
+$env:CHROME_DRIVER_PATH = "C:\path\to\chromedriver.exe"
+$env:CHROME_BINARY_PATH = "C:\path\to\chrome.exe"
 ```
 
 ---
 
 ## 三、使用方法
 
-### 1. 配置输入文件和列
+### 1. 准备输入文件和列
 
-打开 `get_ip_info.py`，找到 `main` 函数中的配置区域：
+推荐运行时用 `-i` 或 `--input` 传入输入文件：
+
+```powershell
+python get_ip_info.py -i examples/input.xlsx
+```
+
+路径包含空格时请加引号：
+
+```powershell
+python get_ip_info.py -i "examples/input.xlsx"
+```
+
+如果不传 `-i/--input`，脚本会使用 `get_ip_info.py` 中 `main` 函数配置区域里的 `INPUT_FILE`。命令行传入的文件路径优先级高于脚本配置。
 
 ```python
 def main():
@@ -118,24 +130,146 @@ def main():
 python get_ip_info.py
 ```
 
+或直接指定输入文件：
+
+```powershell
+python get_ip_info.py -i examples/input.xlsx
+```
+
 如果系统中存在多个 Python 环境，可以指定目标解释器运行：
 
 ```powershell
-& "<Python环境路径>\python.exe" get_ip_info.py
+& "<Python环境路径>\python.exe" get_ip_info.py -i examples/input.xlsx
 ```
 
-### 3. 查看结果
+### 3. 直接查询命令行 IP
 
-脚本会在输出目录生成两个文件：
+不需要输入表格时，可以用 `-ip` 直接传入一个或多个 IP，脚本会生成纯查询结果 Excel：
+
+```powershell
+python get_ip_info.py -ip 1.2.3.4
+```
+
+多个 IP 可以放在同一个 `-ip` 后面：
+
+```powershell
+python get_ip_info.py -ip 1.2.3.4 2.3.4.5 3.4.5.6
+```
+
+也支持逗号、分号或带引号的空白分隔：
+
+```powershell
+python get_ip_info.py -ip "1.2.3.4,2.3.4.5;3.4.5.6"
+```
+
+指定输出目录：
+
+```powershell
+python get_ip_info.py -ip 1.2.3.4 2.3.4.5 -o results
+```
+
+### 4. 查看结果
+
+使用输入文件时，脚本会在输出目录生成两个文件：
 
 | 文件 | 说明 |
 |------|------|
-| `ip_info_result_2025-12-21-234310_UTC+8.xlsx` | 纯查询结果（全部工作表中的每个唯一IP一行） |
+| `ip_info_result_2025-12-21-234310_UTC+8.xlsx` | 纯查询结果，包含 `查询结果` 和 `输出字段说明` 两个工作表 |
 | `原文件名_ip_info_result_2025-12-21-234310_UTC+8.xlsx` | 原表内容 + 追加的查询结果列；Excel 会按原工作表名分别写回 |
+
+使用 `-ip` 直接查询时，只会生成 `ip_info_result_2025-12-21-234310_UTC+8.xlsx` 纯查询结果文件。
 
 ---
 
-## 四、根据不同表格修改配置
+## 四、失败 IP 重试
+
+如果一次查询只有少量 IP 失败，可以基于历史结果文件重试失败项，避免重新查询已经成功的 IP。
+
+`--retry-from` 支持两类历史文件：
+
+- 纯查询结果文件，例如 `ip_info_result_2025-12-21-234310_UTC+8.xlsx`，读取 `IP` 和 `查询状态`。
+- 原表回填结果文件，例如 `input_ip_info_result_2025-12-21-234310_UTC+8.xlsx`，从原始 IP 列读取 IP，并读取 `查询_状态` 等回填列。
+
+历史结果会优先读取 `查询结果` 工作表；如果没有该工作表，则读取所有数据工作表。原表回填结果中的 IP 列会按 `--ip-column` / `IP_COLUMN` 配置识别；未指定时，每个工作表会自动查找所有原始列名中包含 `ip` 的列，并按行取第一个有效 IP。
+
+### 1. 查看会重试哪些 IP
+
+`--dry-run` 只列出目标 IP，不启动浏览器，也不会写入 Excel：
+
+```powershell
+python get_ip_info.py --retry-from ip_info_result_2025-12-21-234310_UTC+8.xlsx --dry-run
+```
+
+默认只选择 `查询状态` 不是 `成功` 的 IP；空状态也会按失败处理。
+
+### 2. 自动重试历史失败项
+
+```powershell
+python get_ip_info.py --retry-from ip_info_result_2025-12-21-234310_UTC+8.xlsx
+```
+
+重试模式会生成：
+
+| 文件 | 说明 |
+|------|------|
+| `ip_info_retry_2025-12-21-234310_UTC+8.xlsx` | 历史结果与本次重试结果合并后的完整 retry 结果；本次结果会覆盖同 IP 的历史记录 |
+
+如果传入的历史文件带有原始文件名前缀，retry 文件也会保留相同前缀。例如 `input_ip_info_result_2025-12-21-234310_UTC+8.xlsx` 会生成 `input_ip_info_retry_2025-12-21-235000_UTC+8.xlsx`。
+
+如果 `--retry-from` 是原表回填结果文件，`ip_info_retry` 输出也会保持原表回填格式，包含之前成功的结果和本次 retry 后的结果；如果 `--retry-from` 是纯查询结果文件，则输出为纯查询结果格式。
+
+### 3. 手动指定重试 IP
+
+指定一个 IP：
+
+```powershell
+python get_ip_info.py --retry-ip 1.2.3.4
+```
+
+指定多个 IP：
+
+```powershell
+python get_ip_info.py --retry-ip 1.2.3.4 --retry-ip 5.6.7.8
+```
+
+也可以使用逗号、分号或空白分隔：
+
+```powershell
+python get_ip_info.py --retry-ips "1.2.3.4,5.6.7.8"
+```
+
+如果同时传入 `--retry-from` 和手动 IP，脚本只会从历史失败项中重试指定 IP。历史结果中已经成功的 IP 默认跳过；需要强制重查时加 `--force`：
+
+```powershell
+python get_ip_info.py --retry-from ip_info_result_2025-12-21-234310_UTC+8.xlsx --retry-ip 1.2.3.4 --force
+```
+
+### 4. 从纯查询结果生成原表 retry 回填文件
+
+如果 `--retry-from` 使用的是纯查询结果文件，并且需要得到“原表 + retry 后查询结果追加列”的完整文件，需要同时传入原始输入文件：
+
+```powershell
+python get_ip_info.py --retry-from ip_info_result_2025-12-21-234310_UTC+8.xlsx -i examples/input.xlsx
+```
+
+此时会额外生成：
+
+| 文件 | 说明 |
+|------|------|
+| `input_ip_info_retry_2025-12-21-234310_UTC+8.xlsx` | 原始输入全部工作表 + retry 后查询结果追加列 |
+
+可选参数：
+
+| 参数 | 说明 |
+|------|------|
+| `--dry-run` | 只列出目标 IP，不启动浏览器，不写入文件 |
+| `--force` | 即使历史结果中 IP 已成功，也重新查询 |
+| `-o/--output-dir` | 指定输出目录 |
+| `--ip-column` | 命令行指定原始输入文件的 IP 列，优先级高于脚本内 `IP_COLUMN` |
+
+---
+
+## 五、根据不同表格修改配置
 
 ### IP_COLUMN 配置说明
 
@@ -170,45 +304,46 @@ IP_COLUMN = None
 
 ---
 
-## 五、输出字段说明
+## 六、输出字段说明
 
-查询结果包含以下字段：
+纯查询结果文件包含 `查询结果` 和 `输出字段说明` 两个工作表。
 
-| 字段 | 说明 |
-|------|------|
-| IP | IP地址 |
-| 类型 | 家宽、数据中心、商宽等 |
-| IP属性 | 原生IP、广播IP |
-| 国家/地区 | 所属国家或地区 |
-| 地理位置-Ip-api | Ip-api 来源的地理位置 |
-| 地理位置-Moe | Moe 来源的地理位置 |
-| 地理位置-Moe+ | Moe+ 来源的地理位置 |
-| 地理位置-Ease | Ease 来源的地理位置 |
-| 地理位置-Internet | Internet 来源的地理位置 |
-| 地理位置-Maxmind | Maxmind 来源的地理位置 |
-| 地理位置-Ipstack | Ipstack 来源的地理位置 |
-| 地理位置-IPinfo | IPinfo 来源的地理位置 |
-| 地理位置-IP2Location | IP2Location 来源的地理位置 |
-| 地理位置-Digital Element | Digital Element 来源的地理位置 |
-| 地理位置-DB-IP | DB-IP 来源的地理位置 |
-| 地理位置-Aliyun | Aliyun 来源的地理位置 |
-| 地理位置-TencentCloud | TencentCloud 来源的地理位置 |
-| 地理位置-Cloudflare | Cloudflare 来源的地理位置 |
-| 地理位置-其他来源 | 页面实际出现但不在标准 14 源中的来源会自动追加，例如 `地理位置-IPLark`、`地理位置-CZ88`、`地理位置-Leak` |
-| ASN | 自治系统编号 |
-| 企业 | 所属企业/运营商 |
-| 使用场景 | 网页“使用场景”字段（例如：普通宽带） |
-| IP评分 | 0-100分 |
-| 数字地址 | 会先点击小眼睛显示完整数字，再提取纯数字 |
-| 备注 | ASN 规模等补充说明 |
-| IP情报-使用类型 | IP情报区域中的“使用类型”（保留 `-`） |
-| IP情报-威胁 | IP情报区域中的“威胁”（保留 `-`） |
-| IP情报-IP类型 | IP情报区域中的“IP类型”（保留 `-`） |
-| IP情报-提供商 | IP情报区域中的“提供商”（保留 `-`） |
-| IP情报-公共代理 | IP情报区域中的“公共代理”（保留 `-`） |
-| IP情报-代理类型 | IP情报区域中的“代理类型”（保留 `-`） |
-| IP情报-标签 | IP情报区域中的“标签”（保留 `-`） |
-| 查询状态 | 成功/超时/错误 |
+`输出字段说明` 工作表会由脚本自动生成 `序号`、`列号`、`字段`、`说明` 四列。`查询结果` 工作表默认包含以下字段；如果页面实际出现不在标准 14 源中的地理位置来源，会在 `地理位置-Cloudflare` 后自动追加实际来源列，例如 `地理位置-IPLark`、`地理位置-CZ88`、`地理位置-Leak`，后续字段列号会相应后移。
+
+| 序号 | 列号 | 字段 | 说明 |
+|------|------|------|------|
+| 1 | A | IP | IP地址 |
+| 2 | B | 类型 | 家宽、数据中心、商宽等 |
+| 3 | C | 使用场景 | 网页“使用场景”字段（例如：普通宽带） |
+| 4 | D | IP属性 | 原生IP、广播IP |
+| 5 | E | 国家/地区 | 所属国家或地区 |
+| 6 | F | 地理位置-Ip-api | Ip-api 来源的地理位置 |
+| 7 | G | 地理位置-Moe | Moe 来源的地理位置 |
+| 8 | H | 地理位置-Moe+ | Moe+ 来源的地理位置 |
+| 9 | I | 地理位置-Ease | Ease 来源的地理位置 |
+| 10 | J | 地理位置-Internet | Internet 来源的地理位置 |
+| 11 | K | 地理位置-Maxmind | Maxmind 来源的地理位置 |
+| 12 | L | 地理位置-Ipstack | Ipstack 来源的地理位置 |
+| 13 | M | 地理位置-IPinfo | IPinfo 来源的地理位置 |
+| 14 | N | 地理位置-IP2Location | IP2Location 来源的地理位置 |
+| 15 | O | 地理位置-Digital Element | Digital Element 来源的地理位置 |
+| 16 | P | 地理位置-DB-IP | DB-IP 来源的地理位置 |
+| 17 | Q | 地理位置-Aliyun | Aliyun 来源的地理位置 |
+| 18 | R | 地理位置-TencentCloud | TencentCloud 来源的地理位置 |
+| 19 | S | 地理位置-Cloudflare | Cloudflare 来源的地理位置 |
+| 20 | T | ASN | 自治系统编号 |
+| 21 | U | 企业 | 所属企业/运营商 |
+| 22 | V | IP评分 | 0-100分 |
+| 23 | W | IP情报-使用类型 | IP情报区域中的“使用类型”（保留 `-`） |
+| 24 | X | IP情报-威胁 | IP情报区域中的“威胁”（保留 `-`） |
+| 25 | Y | IP情报-IP类型 | IP情报区域中的“IP类型”（保留 `-`） |
+| 26 | Z | IP情报-提供商 | IP情报区域中的“提供商”（保留 `-`） |
+| 27 | AA | IP情报-公共代理 | IP情报区域中的“公共代理”（保留 `-`） |
+| 28 | AB | IP情报-代理类型 | IP情报区域中的“代理类型”（保留 `-`） |
+| 29 | AC | IP情报-标签 | IP情报区域中的“标签”（保留 `-`） |
+| 30 | AD | 数字地址 | 会先点击小眼睛显示完整数字，再提取纯数字 |
+| 31 | AE | 备注 | ASN 规模等补充说明 |
+| 32 | AF | 查询状态 | 成功/超时/错误 |
 
 原表追加列（`原文件名_ip_info_result_*.xlsx`）的顺序为：
 
@@ -247,7 +382,7 @@ IP_COLUMN = None
 
 ---
 
-## 六、常见问题
+## 七、常见问题
 
 ### Q: 提示 ChromeDriver 版本不匹配？
 
@@ -272,15 +407,16 @@ IP_COLUMN = None
 
 ---
 
-## 七、文件结构
+## 八、文件结构
 
 ```text
 getiplarkinfo/
 ├── get_ip_info.py          # 主脚本
 ├── requirements.txt        # Python 依赖
 ├── README.md               # 说明文档
-├── examples/input.xlsx     # 示例输入文件（需自行准备，不提交真实数据）
-└── ip_info_result_*.xlsx   # 生成的结果文件
+├── examples/
+│   └── input.xlsx           # 示例输入文件（自行创建或替换）
+└── ip_info_result_*.xlsx    # 生成的结果文件（不要提交）
 ```
 
 ---
