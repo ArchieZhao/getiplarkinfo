@@ -5,10 +5,11 @@
 ## 功能特点
 
 - 支持多种文件格式：`.csv`、`.xlsx`、`.xls`
+- Excel 文件会自动读取全部工作表，工作表不需要命名为 `Sheet1`、`Sheet2`
 - 灵活的列选择：支持列字母（A/B/C...）或列名
 - 自动生成两个结果文件：
   - 纯查询结果表
-  - 原表 + 查询结果追加列
+  - 原表 + 查询结果追加列（Excel 会保留原有多个工作表及其名称）
 - 适配 iplark 新版页面结构：
   - “数字地址”会先点击小眼睛显示完整数字，再提取纯数字
   - “国家/地区”会拼接国旗 alt 与文本（例如 `China中国`）
@@ -20,6 +21,7 @@
 ## 环境要求
 
 - Python 3.7+
+- 建议使用虚拟环境或 Conda 环境
 - Chrome 浏览器
 - ChromeDriver（版本需与 Chrome 匹配）
 
@@ -27,14 +29,22 @@
 
 ## 一、安装依赖
 
-```bash
-pip install -r requirements.txt
+建议先创建并激活虚拟环境或 Conda 环境，再安装依赖：
+
+```powershell
+python -m pip install -r requirements.txt
 ```
 
 或手动安装：
 
-```bash
-pip install pandas selenium openpyxl xlrd
+```powershell
+python -m pip install pandas selenium openpyxl xlrd
+```
+
+如果系统中存在多个 Python 环境，Windows PowerShell 下也可以直接指定目标环境的 `python.exe`：
+
+```powershell
+& "<Python环境路径>\python.exe" -m pip install -r requirements.txt
 ```
 
 ---
@@ -102,8 +112,16 @@ def main():
 
 ### 2. 运行脚本
 
-```bash
+进入项目目录后运行：
+
+```powershell
 python get_ip_info.py
+```
+
+如果系统中存在多个 Python 环境，可以指定目标解释器运行：
+
+```powershell
+& "<Python环境路径>\python.exe" get_ip_info.py
 ```
 
 ### 3. 查看结果
@@ -112,8 +130,8 @@ python get_ip_info.py
 
 | 文件 | 说明 |
 |------|------|
-| `ip_info_result_2025-12-21-234310_UTC+8.xlsx` | 纯查询结果（每个唯一IP一行） |
-| `原文件名_ip_info_result_2025-12-21-234310_UTC+8.xlsx` | 原表内容 + 追加的查询结果列 |
+| `ip_info_result_2025-12-21-234310_UTC+8.xlsx` | 纯查询结果（全部工作表中的每个唯一IP一行） |
+| `原文件名_ip_info_result_2025-12-21-234310_UTC+8.xlsx` | 原表内容 + 追加的查询结果列；Excel 会按原工作表名分别写回 |
 
 ---
 
@@ -121,14 +139,16 @@ python get_ip_info.py
 
 ### IP_COLUMN 配置说明
 
+Excel 文件包含多个工作表时，脚本会逐个工作表识别 IP 列并提取 IP。相同 IP 即使出现在多个工作表，也只会查询一次，然后把结果回填到所有出现过的行。
+
 | 值 | 说明 | 示例 |
 |----|------|------|
-| `None` | 自动检测（查找列名包含 "ip" 的列） | `IP_COLUMN = None` |
-| `'A'` | 使用 A 列（第1列） | `IP_COLUMN = 'A'` |
+| `None` | 每个工作表自动检测（查找列名包含 "ip" 的列） | `IP_COLUMN = None` |
+| `'A'` | 每个工作表使用 A 列（第1列） | `IP_COLUMN = 'A'` |
 | `'B'` | 使用 B 列（第2列） | `IP_COLUMN = 'B'` |
 | `'H'` | 使用 H 列（第8列） | `IP_COLUMN = 'H'` |
 | `'AA'` | 使用 AA 列（第27列） | `IP_COLUMN = 'AA'` |
-| `'登录ip'` | 使用名为 "登录ip" 的列 | `IP_COLUMN = '登录ip'` |
+| `'登录ip'` | 每个工作表查找名为或包含 "登录ip" 的列 | `IP_COLUMN = '登录ip'` |
 | `'IP地址'` | 使用名为 "IP地址" 的列 | `IP_COLUMN = 'IP地址'` |
 
 ### 示例
@@ -257,7 +277,7 @@ getiplarkinfo/
 ├── get_ip_info.py          # 主脚本
 ├── requirements.txt        # Python 依赖
 ├── README.md               # 说明文档
-├── 账户近六个月登录日志*.xlsx   # 示例输入文件（你的实际数据）
+├── 登录日志*.xlsx   # 示例输入文件（你的实际数据）
 └── ip_info_result_*.xlsx   # 生成的结果文件
 ```
 

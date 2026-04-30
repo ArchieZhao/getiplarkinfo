@@ -5,7 +5,8 @@ IP信息查询脚本
 
 使用说明：
 1. 支持的文件格式：.csv, .xlsx, .xls
-2. 修改下方配置区域的参数来适配你的文件
+2. Excel文件会自动读取全部工作表，不要求工作表名为Sheet1/Sheet2
+3. 修改下方配置区域的参数来适配你的文件
 
 配置示例：
 - IP_COLUMN = 'A'  表示读取A列
@@ -352,45 +353,71 @@ def column_letter_to_index(letter):
     return result - 1
 
 
-def read_file_to_dataframe(file_path):
+def read_file_to_dataframes(file_path):
     """
-    读取文件为DataFrame
+    读取文件为工作表DataFrame字典
 
     参数:
         file_path: 文件路径，支持 .csv, .xlsx, .xls 格式
 
     返回:
-        (DataFrame, 成功标志)
+        ({工作表名: DataFrame}, 成功标志)
     """
     try:
         file_ext = os.path.splitext(file_path)[1].lower()
-        df = None
+        sheets = None
 
         if file_ext == '.csv':
+            df = None
             for encoding in ['utf-8', 'gbk', 'gb2312', 'latin1']:
                 try:
                     df = pd.read_csv(file_path, encoding=encoding)
                     break
                 except UnicodeDecodeError:
                     continue
+            if df is not None:
+                sheets = {'原始数据': df}
         elif file_ext in ['.xlsx', '.xls']:
             try:
-                df = pd.read_excel(file_path, engine='openpyxl' if file_ext == '.xlsx' else 'xlrd')
+                sheets = pd.read_excel(
+                    file_path,
+                    sheet_name=None,
+                    engine='openpyxl' if file_ext == '.xlsx' else 'xlrd'
+                )
             except Exception:
-                df = pd.read_excel(file_path)
+                sheets = pd.read_excel(file_path, sheet_name=None)
         else:
             print(f"不支持的文件格式: {file_ext}")
             print("支持的格式: .csv, .xlsx, .xls")
             return None, False
 
-        if df is None or df.empty:
+        if not sheets:
             print("无法读取文件或文件为空")
             return None, False
 
-        return df, True
+        has_data_sheet = any(df is not None and not df.empty for df in sheets.values())
+        if not has_data_sheet:
+            print("无法读取文件或文件为空")
+            return None, False
+
+        return sheets, True
     except Exception as e:
         print(f"读取文件失败: {e}")
         return None, False
+
+
+def read_file_to_dataframe(file_path):
+    """
+    兼容旧调用：读取第一个工作表为DataFrame
+
+    返回:
+        (DataFrame, 成功标志)
+    """
+    sheets, success = read_file_to_dataframes(file_path)
+    if not success:
+        return None, False
+    first_df = next(iter(sheets.values()))
+    return first_df, True
 
 
 def get_ip_column_name(df, ip_column=None):
@@ -404,6 +431,10 @@ def get_ip_column_name(df, ip_column=None):
     返回:
         列名 或 None
     """
+    if df is None or len(df.columns) == 0:
+        print("当前工作表没有可用的列")
+        return None
+
     if ip_column is None:
         for col in df.columns:
             if 'ip' in str(col).lower():
@@ -451,6 +482,43 @@ def extract_ips_from_column(df, column_name):
     return ips, ip_to_rows
 
 
+def collect_ips_from_sheets(original_sheets, ip_column=None):
+    """
+    从全部工作表提取唯一IP和回填位置
+
+    返回:
+        (唯一IP列表, IP到工作表行索引的映射)
+    """
+    ips = []
+    ip_to_rows = {}  # IP -> [(工作表名, 行索引)]
+
+    for sheet_name, df_original in original_sheets.items():
+        if df_original is None or df_original.empty:
+            print(f"工作表 [{sheet_name}] 为空，跳过IP提取")
+            continue
+
+        ip_column_name = get_ip_column_name(df_original, ip_column)
+        if ip_column_name is None:
+            print(f"工作表 [{sheet_name}] 未找到IP列，跳过")
+            continue
+
+        print(f"工作表 [{sheet_name}] 使用列: {ip_column_name} (索引: {list(df_original.columns).index(ip_column_name)})")
+
+        sheet_ips, sheet_ip_to_rows = extract_ips_from_column(df_original, ip_column_name)
+        if not sheet_ips:
+            print(f"工作表 [{sheet_name}] 未找到有效IP")
+            continue
+
+        print(f"工作表 [{sheet_name}] 找到 {len(sheet_ips)} 个唯一IP")
+        for ip in sheet_ips:
+            if ip not in ip_to_rows:
+                ip_to_rows[ip] = []
+                ips.append(ip)
+            ip_to_rows[ip].extend((sheet_name, row_idx) for row_idx in sheet_ip_to_rows[ip])
+
+    return ips, ip_to_rows
+
+
 def main():
     # ==================== 用户配置区域 ====================
     # 输入文件路径（支持 .csv, .xlsx, .xls 格式）
@@ -490,26 +558,23 @@ def main():
 
     print(f"\n[1/4] 正在读取文件: {INPUT_FILE}")
 
-    # 读取原始DataFrame
-    df_original, success = read_file_to_dataframe(INPUT_FILE)
+    # 读取原始工作表。Excel会读取全部sheet；CSV按单个工作表处理。
+    original_sheets, success = read_file_to_dataframes(INPUT_FILE)
     if not success:
         return
 
-    # 确定IP列
-    ip_column_name = get_ip_column_name(df_original, IP_COLUMN)
-    if ip_column_name is None:
-        return
+    print(f"读取到 {len(original_sheets)} 个工作表:")
+    for sheet_name in original_sheets:
+        print(f"  - {sheet_name}")
 
-    print(f"使用列: {ip_column_name} (索引: {list(df_original.columns).index(ip_column_name)})")
-
-    # 提取IP地址
-    ips, ip_to_rows = extract_ips_from_column(df_original, ip_column_name)
+    # 确定每个工作表的IP列，并汇总全部工作表中的唯一IP
+    ips, ip_to_rows = collect_ips_from_sheets(original_sheets, IP_COLUMN)
 
     if not ips:
         print("未找到有效的IP地址！")
         return
 
-    print(f"找到 {len(ips)} 个唯一IP地址:")
+    print(f"全部工作表共找到 {len(ips)} 个唯一IP地址:")
     for ip in ips:
         print(f"  - {ip}")
 
@@ -566,19 +631,25 @@ def main():
                    'IP情报-威胁', 'IP情报-IP类型', 'IP情报-提供商', 'IP情报-公共代理',
                    'IP情报-代理类型', 'IP情报-标签', '查询状态']
 
-    # 初始化新列
-    for col in append_columns:
-        df_original[col] = ''
+    # 初始化每个工作表的新列
+    for df_original in original_sheets.values():
+        if df_original is None:
+            continue
+        for col in append_columns:
+            df_original[col] = ''
 
-    # 填充查询结果到对应行
+    # 填充查询结果到对应工作表的对应行
     for ip, row_indices in ip_to_rows.items():
         if ip in ip_to_result:
             result = ip_to_result[ip]
-            for row_idx in row_indices:
+            for sheet_name, row_idx in row_indices:
+                df_original = original_sheets[sheet_name]
                 for col_name, key in zip(append_columns, result_keys):
                     df_original.at[row_idx, col_name] = result.get(key, '')
 
-    df_original.to_excel(output_file_2, index=False, engine='openpyxl')
+    with pd.ExcelWriter(output_file_2, engine='openpyxl') as writer:
+        for sheet_name, df_original in original_sheets.items():
+            df_original.to_excel(writer, index=False, sheet_name=sheet_name)
     print(f"  文件2: {output_file_2}")
 
     success_count = sum(1 for r in results if r['查询状态'] == '成功')
