@@ -6,7 +6,8 @@ IP信息查询脚本
 使用说明：
 1. 支持的文件格式：.csv, .xlsx, .xls
 2. Excel文件会自动读取全部工作表，不要求工作表名为Sheet1/Sheet2
-3. 修改下方配置区域的参数来适配你的文件
+3. 地理位置支持14个数据源多源对比采集
+4. 修改下方配置区域的参数来适配你的文件
 
 配置示例：
 - IP_COLUMN = 'A'  表示读取A列
@@ -16,14 +17,15 @@ IP信息查询脚本
 
 输出文件：
 1. ip_info_result_时间戳_UTC+X.xlsx - 纯查询结果
-2. 原文件名_ip_info_result_时间戳_UTC+X.xlsx - 原表+查询结果
+2. 原文件名_ip_info_result_时间戳_UTC+X.xlsx - 原表全部工作表+查询结果
 """
 
-import pandas as pd
-import time
-import re
 import os
-from datetime import datetime, timezone
+import re
+import time
+from datetime import datetime
+
+import pandas as pd
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -37,6 +39,140 @@ GEO_SOURCES = [
     'IPinfo', 'IP2Location', 'Digital Element', 'DB-IP',
     'Aliyun', 'TencentCloud', 'Cloudflare',
 ]
+GEO_RESULT_KEYS = [f'地理位置-{source}' for source in GEO_SOURCES]
+GEO_SOURCE_LOOKUP = {source.casefold(): source for source in GEO_SOURCES}
+
+INTEL_FIELD_MAPPINGS = [
+    ('使用类型', 'IP情报-使用类型'),
+    ('威胁', 'IP情报-威胁'),
+    ('IP类型', 'IP情报-IP类型'),
+    ('提供商', 'IP情报-提供商'),
+    ('公共代理', 'IP情报-公共代理'),
+    ('代理类型', 'IP情报-代理类型'),
+    ('标签', 'IP情报-标签'),
+]
+INTEL_LABEL_ALIASES = {
+    '代理': '公共代理',
+}
+LEGACY_INTEL_KEYS = [label for label, _ in INTEL_FIELD_MAPPINGS]
+INTEL_RESULT_KEYS = [key for _, key in INTEL_FIELD_MAPPINGS]
+INTEL_RESULT_KEY_BY_LABEL = dict(INTEL_FIELD_MAPPINGS)
+for alias, canonical_label in INTEL_LABEL_ALIASES.items():
+    INTEL_RESULT_KEY_BY_LABEL[alias] = INTEL_RESULT_KEY_BY_LABEL[canonical_label]
+
+BASE_RESULT_KEYS = [
+    'IP', '类型', 'IP属性', '数字地址', '国家/地区',
+    'ASN', '企业', '使用场景', 'IP评分', '备注', '查询状态',
+]
+def normalize_label_text(text):
+    """
+    规范化页面标签文本，去除多余空白和中英文冒号。
+
+    返回:
+        规范化后的标签字符串
+    """
+    return re.sub(r'\s+', ' ', str(text or '')).strip().rstrip(':：')
+
+
+def normalize_geo_source_name(source_name):
+    """
+    将页面中的地理位置数据源名称映射为标准名称。
+
+    返回:
+        GEO_SOURCES 中的标准名称；未知来源返回页面原始名称，避免丢数据。
+    """
+    normalized = normalize_label_text(source_name)
+    if not normalized:
+        return None
+    return GEO_SOURCE_LOOKUP.get(normalized.casefold(), normalized)
+
+
+def collect_geo_result_keys(results=None):
+    """
+    汇总地理位置结果列。
+
+    返回:
+        先包含 14 个标准数据源，再追加页面实际出现的新增数据源。
+    """
+    geo_keys = list(GEO_RESULT_KEYS)
+    if results:
+        for result in results:
+            for key in result:
+                if key.startswith('地理位置-') and key not in geo_keys:
+                    geo_keys.append(key)
+    return geo_keys
+
+
+def build_result_columns(geo_result_keys=None):
+    """
+    构造纯查询结果文件的列顺序。
+
+    返回:
+        列名列表
+    """
+    if geo_result_keys is None:
+        geo_result_keys = GEO_RESULT_KEYS
+    return [
+        'IP', '类型', 'IP属性', '国家/地区',
+    ] + list(geo_result_keys) + [
+        'ASN', '企业', '使用场景', 'IP评分',
+    ] + INTEL_RESULT_KEYS + [
+        '数字地址', '备注', '查询状态',
+    ]
+
+
+def build_append_column_mappings(geo_result_keys=None):
+    """
+    构造原表回填列与查询结果字段的映射。
+
+    返回:
+        [(回填列名, 结果字段名), ...]
+    """
+    if geo_result_keys is None:
+        geo_result_keys = GEO_RESULT_KEYS
+    return [
+        ('查询_类型', '类型'),
+        ('查询_使用场景', '使用场景'),
+        ('查询_IP属性', 'IP属性'),
+        ('查询_国家地区', '国家/地区'),
+    ] + [
+        (f'查询_{geo_key}', geo_key) for geo_key in geo_result_keys
+    ] + [
+        ('查询_ASN', 'ASN'),
+        ('查询_企业', '企业'),
+        ('查询_IP评分', 'IP评分'),
+        ('查询_数字地址', '数字地址'),
+        ('查询_备注', '备注'),
+    ] + [
+        (key, key) for key in INTEL_RESULT_KEYS
+    ] + [
+        ('查询_状态', '查询状态'),
+    ]
+
+
+def build_empty_result(ip):
+    """
+    创建单个 IP 的完整结果模板，确保所有输出字段稳定存在。
+
+    返回:
+        查询结果字典
+    """
+    result = {}
+    for key in BASE_RESULT_KEYS + LEGACY_INTEL_KEYS + INTEL_RESULT_KEYS + GEO_RESULT_KEYS:
+        result[key] = ''
+    result['IP'] = ip
+    return result
+
+
+def is_excel_column_reference(value):
+    """
+    判断用户输入是否是 Excel 列字母引用，例如 A、H、AA。
+
+    注意:
+        `ip`/`IP` 应优先按列名关键词处理，不能误判为 Excel 的 IP 列。
+    """
+    value = str(value or '').strip()
+    return bool(value) and value.lower() != 'ip' and len(value) <= 2 and value.isalpha()
 
 
 def setup_driver():
@@ -66,7 +202,9 @@ def extract_ip_from_hostname(hostname):
     hostname = hostname.strip()
     ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
     if re.match(ip_pattern, hostname):
-        return hostname
+        octets = hostname.split('.')
+        if all(0 <= int(octet) <= 255 for octet in octets):
+            return hostname
     return None
 
 
@@ -84,42 +222,85 @@ def safe_find_texts(driver, by, selector):
     try:
         elements = driver.find_elements(by, selector)
         return [e.text.strip() for e in elements]
-    except:
+    except Exception:
         return []
+
+
+def extract_geo_locations(driver, result):
+    """
+    从 iplark 页面提取 14 个地理位置数据源的结果。
+
+    参数:
+        driver: Selenium WebDriver
+        result: 待更新的结果字典
+    """
+    geo_source_divs = driver.find_elements(By.CSS_SELECTOR, '.geo-source')
+    for geo_div in geo_source_divs:
+        try:
+            raw_source = geo_div.find_element(By.CSS_SELECTOR, '.source-tag').text
+            source_name = normalize_geo_source_name(raw_source)
+            if not source_name:
+                continue
+
+            value_spans = geo_div.find_elements(By.CSS_SELECTOR, 'span:not(.source-tag)')
+            geo_text = ' '.join(s.text.strip() for s in value_spans if s.text.strip())
+            if geo_text:
+                result[f'地理位置-{source_name}'] = geo_text
+        except Exception:
+            continue
+
+
+def extract_ip_intelligence(driver, result):
+    """
+    从 IP 情报区域提取字段，并同时兼容旧字段名。
+
+    参数:
+        driver: Selenium WebDriver
+        result: 待更新的结果字典
+    """
+    try:
+        intel_elem = driver.find_element(By.ID, 'ip-intelligence')
+    except NoSuchElementException:
+        return
+
+    span_elems = intel_elem.find_elements(By.CSS_SELECTOR, 'span')
+    legacy_keys = set(LEGACY_INTEL_KEYS)
+
+    i = 0
+    while i < len(span_elems):
+        strongs = span_elems[i].find_elements(By.TAG_NAME, 'strong')
+        if not strongs:
+            i += 1
+            continue
+
+        raw_label = normalize_label_text(strongs[0].text)
+        canonical_label = INTEL_LABEL_ALIASES.get(raw_label, raw_label)
+        key = INTEL_RESULT_KEY_BY_LABEL.get(raw_label)
+
+        value = ''
+        if i + 1 < len(span_elems):
+            next_has_strong = span_elems[i + 1].find_elements(By.TAG_NAME, 'strong')
+            if not next_has_strong:
+                value = span_elems[i + 1].text.strip()
+                i += 1
+
+        # IP情报字段需要保留“-”等占位值，因此不跳过 value == '-'
+        if key and value and not result.get(key):
+            result[key] = value
+
+        # 兼容原有字段：仅在有实际值（非 '-'）时回填
+        if canonical_label in legacy_keys and value and value != '-' and not result.get(canonical_label):
+            result[canonical_label] = value
+            if canonical_label == '使用类型' and not result.get('使用场景'):
+                result['使用场景'] = value
+
+        i += 1
 
 
 def get_ip_info(driver, ip, retry_count=2):
     """查询单个IP的信息，带重试机制"""
     url = f"https://iplark.com/{ip}"
-    result = {
-        'IP': ip,
-        '类型': '',
-        'IP属性': '',
-        '数字地址': '',
-        '国家/地区': '',
-        'ASN': '',
-        '企业': '',
-        '使用场景': '',
-        'IP评分': '',
-        '备注': '',
-        '使用类型': '',
-        '威胁': '',
-        'IP类型': '',
-        '提供商': '',
-        '公共代理': '',
-        '代理类型': '',
-        '标签': '',
-        'IP情报-使用类型': '',
-        'IP情报-威胁': '',
-        'IP情报-IP类型': '',
-        'IP情报-提供商': '',
-        'IP情报-公共代理': '',
-        'IP情报-代理类型': '',
-        'IP情报-标签': '',
-        '查询状态': ''
-    }
-    for src in GEO_SOURCES:
-        result[f'地理位置-{src}'] = ''
+    result = build_empty_result(ip)
 
     for attempt in range(retry_count + 1):
         try:
@@ -138,7 +319,7 @@ def get_ip_info(driver, ip, retry_count=2):
                     d.find_elements(By.CSS_SELECTOR, '.info-item .value') or
                     d.find_elements(By.ID, 'score-value')
                 ))
-            except:
+            except TimeoutException:
                 pass
 
             # 3. 等待页面完全加载（document.readyState）
@@ -218,7 +399,7 @@ def get_ip_info(driver, ip, retry_count=2):
                             result['使用类型'] = value
                     elif '备注' in label:
                         result['备注'] = value
-                except:
+                except Exception:
                     continue
 
             # 获取IP评分 - 多种方式尝试
@@ -232,65 +413,9 @@ def get_ip_info(driver, ip, retry_count=2):
                     score = ratio.split('/')[0]
             result['IP评分'] = score
 
-            # 获取地理位置（多源对比）
-            geo_source_divs = driver.find_elements(By.CSS_SELECTOR, '.geo-source')
-            for geo_div in geo_source_divs:
-                try:
-                    source_tag = geo_div.find_element(By.CSS_SELECTOR, '.source-tag').text.strip()
-                    value_spans = geo_div.find_elements(By.CSS_SELECTOR, 'span:not(.source-tag)')
-                    geo_text = ' '.join(s.text.strip() for s in value_spans if s.text.strip())
-                    key = f'地理位置-{source_tag}'
-                    if key in result:
-                        result[key] = geo_text
-                except:
-                    continue
-
-            # 获取IP情报
-            try:
-                intel_elem = driver.find_element(By.ID, 'ip-intelligence')
-                span_elems = intel_elem.find_elements(By.CSS_SELECTOR, 'span')
-
-                label_to_key = {
-                    '使用类型': 'IP情报-使用类型',
-                    '威胁': 'IP情报-威胁',
-                    'IP类型': 'IP情报-IP类型',
-                    '提供商': 'IP情报-提供商',
-                    '公共代理': 'IP情报-公共代理',
-                    '代理类型': 'IP情报-代理类型',
-                    '标签': 'IP情报-标签',
-                }
-                legacy_keys = {'使用类型', '威胁', 'IP类型', '提供商', '公共代理', '代理类型', '标签'}
-
-                i = 0
-                while i < len(span_elems):
-                    strongs = span_elems[i].find_elements(By.TAG_NAME, 'strong')
-                    if not strongs:
-                        i += 1
-                        continue
-
-                    raw_label = strongs[0].text.strip().rstrip(':：')
-                    key = label_to_key.get(raw_label)
-
-                    value = ''
-                    if i + 1 < len(span_elems):
-                        next_has_strong = span_elems[i + 1].find_elements(By.TAG_NAME, 'strong')
-                        if not next_has_strong:
-                            value = span_elems[i + 1].text.strip()
-                            i += 1
-
-                    # IP情报字段需要保留“-”等占位值，因此不跳过 value == '-'
-                    if key and value and not result.get(key):
-                        result[key] = value
-
-                    # 兼容原有字段：仅在有实际值（非 '-'）时回填
-                    if raw_label in legacy_keys and value and value != '-' and not result.get(raw_label):
-                        result[raw_label] = value
-                        if raw_label == '使用类型' and not result.get('使用场景'):
-                            result['使用场景'] = value
-
-                    i += 1
-            except NoSuchElementException:
-                pass
+            # 获取地理位置（14个数据源多源对比）和 IP 情报
+            extract_geo_locations(driver, result)
+            extract_ip_intelligence(driver, result)
 
             result['查询状态'] = '成功'
             return result
@@ -301,7 +426,7 @@ def get_ip_info(driver, ip, retry_count=2):
                 time.sleep(2)
                 continue
             result['查询状态'] = '超时'
-        except WebDriverException as e:
+        except WebDriverException:
             if attempt < retry_count:
                 print(f"    浏览器异常，重试 {attempt + 1}/{retry_count}...")
                 time.sleep(2)
@@ -440,22 +565,24 @@ def get_ip_column_name(df, ip_column=None):
             if 'ip' in str(col).lower():
                 return col
         return df.columns[-2] if len(df.columns) >= 2 else df.columns[-1]
-    elif len(ip_column) <= 2 and ip_column.isalpha():
-        col_index = column_letter_to_index(ip_column)
+
+    ip_column_text = str(ip_column).strip()
+    if ip_column_text in df.columns:
+        return ip_column_text
+
+    if is_excel_column_reference(ip_column_text):
+        col_index = column_letter_to_index(ip_column_text)
         if col_index < len(df.columns):
             return df.columns[col_index]
-        else:
-            print(f"列 {ip_column} 超出范围，文件只有 {len(df.columns)} 列")
-            return None
-    else:
-        if ip_column in df.columns:
-            return ip_column
-        for col in df.columns:
-            if ip_column.lower() in str(col).lower():
-                return col
-        print(f"未找到列: {ip_column}")
-        print(f"可用的列: {list(df.columns)}")
+        print(f"列 {ip_column_text} 超出范围，文件只有 {len(df.columns)} 列")
         return None
+
+    for col in df.columns:
+        if ip_column_text.lower() in str(col).lower():
+            return col
+    print(f"未找到列: {ip_column_text}")
+    print(f"可用的列: {list(df.columns)}")
+    return None
 
 
 def extract_ips_from_column(df, column_name):
@@ -522,7 +649,7 @@ def collect_ips_from_sheets(original_sheets, ip_column=None):
 def main():
     # ==================== 用户配置区域 ====================
     # 输入文件路径（支持 .csv, .xlsx, .xls 格式）
-    INPUT_FILE = r'E:\AAAAAcodedata\getiplarkinfo\testip.xlsx'
+    INPUT_FILE = r'examples/input.xlsx'
 
     # 输出目录（留空则与输入文件同目录）
     OUTPUT_DIR = r''
@@ -545,6 +672,7 @@ def main():
     print("=" * 60)
     print("IP信息查询工具 - iplark.com")
     print(f"查询时间: {timestamp} ({tz_str})")
+    print(f"地理位置数据源: {len(GEO_SOURCES)} 个")
     print("=" * 60)
 
     # 确定输出目录和文件名
@@ -604,32 +732,16 @@ def main():
 
     # ===== 文件1: 纯查询结果 =====
     df_result = pd.DataFrame(results)
-    geo_columns = [f'地理位置-{src}' for src in GEO_SOURCES]
-    columns_order = ['IP', '类型', 'IP属性', '国家/地区'] + geo_columns + [
-                     'ASN', '企业', '使用场景', 'IP评分', 'IP情报-使用类型',
-                     'IP情报-威胁', 'IP情报-IP类型', 'IP情报-提供商',
-                     'IP情报-公共代理', 'IP情报-代理类型', 'IP情报-标签',
-                     '数字地址', '备注', '查询状态']
-    columns_order = [c for c in columns_order if c in df_result.columns]
+    geo_result_keys = collect_geo_result_keys(results)
+    columns_order = [c for c in build_result_columns(geo_result_keys) if c in df_result.columns]
     df_result = df_result[columns_order]
     df_result.to_excel(output_file_1, index=False, engine='openpyxl')
     print(f"  文件1: {output_file_1}")
 
     # ===== 文件2: 原表 + 查询结果 =====
     # 要追加的列（不包含IP列，因为原表已有）
-    geo_append_cols = [f'查询_地理位置-{src}' for src in GEO_SOURCES]
-    geo_result_keys = [f'地理位置-{src}' for src in GEO_SOURCES]
-    append_columns = ['查询_类型', '查询_使用场景', '查询_IP属性', '查询_国家地区'
-                      ] + geo_append_cols + [
-                      '查询_ASN', '查询_企业', '查询_IP评分',
-                      '查询_数字地址', '查询_备注', 'IP情报-使用类型', 'IP情报-威胁',
-                      'IP情报-IP类型', 'IP情报-提供商', 'IP情报-公共代理',
-                      'IP情报-代理类型', 'IP情报-标签', '查询_状态']
-    result_keys = ['类型', '使用场景', 'IP属性', '国家/地区'
-                   ] + geo_result_keys + [
-                   'ASN', '企业', 'IP评分', '数字地址', '备注', 'IP情报-使用类型',
-                   'IP情报-威胁', 'IP情报-IP类型', 'IP情报-提供商', 'IP情报-公共代理',
-                   'IP情报-代理类型', 'IP情报-标签', '查询状态']
+    append_column_mappings = build_append_column_mappings(geo_result_keys)
+    append_columns = [column for column, _ in append_column_mappings]
 
     # 初始化每个工作表的新列
     for df_original in original_sheets.values():
@@ -644,7 +756,7 @@ def main():
             result = ip_to_result[ip]
             for sheet_name, row_idx in row_indices:
                 df_original = original_sheets[sheet_name]
-                for col_name, key in zip(append_columns, result_keys):
+                for col_name, key in append_column_mappings:
                     df_original.at[row_idx, col_name] = result.get(key, '')
 
     with pd.ExcelWriter(output_file_2, engine='openpyxl') as writer:

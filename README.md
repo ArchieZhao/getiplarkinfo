@@ -13,9 +13,9 @@
 - 适配 iplark 新版页面结构：
   - “数字地址”会先点击小眼睛显示完整数字，再提取纯数字
   - “国家/地区”会拼接国旗 alt 与文本（例如 `China中国`）
-  - 新增”使用场景”字段
-  - 新增一组”IP情报-…”字段，并保留 `-` 占位值
-  - 地理位置支持多源对比采集（Ip-api、Moe、Moe+、Ease、Internet、Maxmind、Ipstack、IPinfo、IP2Location、Digital Element、DB-IP、Aliyun、TencentCloud、Cloudflare）
+  - 新增“使用场景”字段
+  - 新增一组“IP情报-…”字段，并保留 `-` 占位值
+  - 地理位置支持 14 个标准数据源多源对比采集，并会自动追加页面实际出现的新来源
 - 文件名自动添加时间戳和时区
 
 ## 环境要求
@@ -100,7 +100,7 @@ def setup_driver():
 def main():
     # ==================== 用户配置区域 ====================
     # 输入文件路径（支持 .csv, .xlsx, .xls 格式）
-    INPUT_FILE = r'E:\AAAAAcodedata\getiplarkinfo\账户近六个月登录日志 - 副本 - 副本.xlsx'
+    INPUT_FILE = r'examples/input.xlsx'
 
     # 输出目录（留空则与输入文件同目录）
     OUTPUT_DIR = r''
@@ -194,6 +194,7 @@ IP_COLUMN = None
 | 地理位置-Aliyun | Aliyun 来源的地理位置 |
 | 地理位置-TencentCloud | TencentCloud 来源的地理位置 |
 | 地理位置-Cloudflare | Cloudflare 来源的地理位置 |
+| 地理位置-其他来源 | 页面实际出现但不在标准 14 源中的来源会自动追加，例如 `地理位置-IPLark`、`地理位置-CZ88`、`地理位置-Leak` |
 | ASN | 自治系统编号 |
 | 企业 | 所属企业/运营商 |
 | 使用场景 | 网页“使用场景”字段（例如：普通宽带） |
@@ -229,19 +230,20 @@ IP_COLUMN = None
 16. `查询_地理位置-Aliyun`
 17. `查询_地理位置-TencentCloud`
 18. `查询_地理位置-Cloudflare`
-19. `查询_ASN`
-20. `查询_企业`
-21. `查询_IP评分`
-22. `查询_数字地址`
-23. `查询_备注`
-24. `IP情报-使用类型`
-25. `IP情报-威胁`
-26. `IP情报-IP类型`
-27. `IP情报-提供商`
-28. `IP情报-公共代理`
-29. `IP情报-代理类型`
-30. `IP情报-标签`
-31. `查询_状态`
+19. `查询_地理位置-其他来源`（页面实际出现但不在标准 14 源中的来源会自动追加，例如 `查询_地理位置-IPLark`）
+20. `查询_ASN`
+21. `查询_企业`
+22. `查询_IP评分`
+23. `查询_数字地址`
+24. `查询_备注`
+25. `IP情报-使用类型`
+26. `IP情报-威胁`
+27. `IP情报-IP类型`
+28. `IP情报-提供商`
+29. `IP情报-公共代理`
+30. `IP情报-代理类型`
+31. `IP情报-标签`
+32. `查询_状态`
 
 ---
 
@@ -277,7 +279,7 @@ getiplarkinfo/
 ├── get_ip_info.py          # 主脚本
 ├── requirements.txt        # Python 依赖
 ├── README.md               # 说明文档
-├── 登录日志*.xlsx   # 示例输入文件（你的实际数据）
+├── examples/input.xlsx     # 示例输入文件（需自行准备，不提交真实数据）
 └── ip_info_result_*.xlsx   # 生成的结果文件
 ```
 
