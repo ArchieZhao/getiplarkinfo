@@ -12,8 +12,8 @@ IP信息查询脚本
 配置示例：
 - IP_COLUMN = 'A'  表示读取A列
 - IP_COLUMN = 'H'  表示读取H列（第8列）
-- IP_COLUMN = 'ip' 表示自动查找列名包含'ip'的列
-- IP_COLUMN = None 表示自动检测（查找包含'ip'的列名，否则使用最后一列）
+- IP_COLUMN = 'ip' 表示指定查找列名包含'ip'的列
+- IP_COLUMN = None 表示自动检测（扫描各列内容，提取公网 IPv4 地址）
 
 输出文件：
 1. ip_info_result_时间戳_UTC+X.xlsx - 纯查询结果
@@ -21,12 +21,14 @@ IP信息查询脚本
 """
 
 import argparse
+import ipaddress
 import os
 import re
 import time
 from datetime import datetime
 
 import pandas as pd
+from openpyxl.utils import get_column_letter
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -62,12 +64,14 @@ for alias, canonical_label in INTEL_LABEL_ALIASES.items():
     INTEL_RESULT_KEY_BY_LABEL[alias] = INTEL_RESULT_KEY_BY_LABEL[canonical_label]
 
 BASE_RESULT_KEYS = [
-    'IP', '类型', 'IP属性', '数字地址', '国家/地区',
+    'IP', '页面顶部标签', '反查域名', '类型', 'IP属性', '数字地址', '国家/地区',
     'ASN', '企业', '使用场景', 'IP评分', '备注', '查询状态',
 ]
 
 RESULT_FIELD_DESCRIPTIONS = {
     'IP': 'IP地址',
+    '页面顶部标签': '页面 IP 标题下方的子标签，按页面顺序用分号连接',
+    '反查域名': '页面顶部子标签中看起来像 DNS 反查主机名的值',
     '类型': '家宽、数据中心、商宽等',
     'IP属性': '原生IP、广播IP',
     '国家/地区': '所属国家或地区',
@@ -86,6 +90,43 @@ RESULT_FIELD_DESCRIPTIONS = {
     '备注': 'ASN 规模等补充说明',
     '查询状态': '成功/超时/错误',
 }
+
+QUERY_IP_APPEND_COLUMN = '查询IP'
+EXCEL_TEXT_NUMBER_FORMAT = '@'
+LONG_NUMERIC_TEXT_MIN_DIGITS = 11
+TEXT_PRESERVE_EXACT_COLUMNS = {
+    'IP',
+    QUERY_IP_APPEND_COLUMN,
+    '数字地址',
+}
+TEXT_PRESERVE_COLUMN_KEYWORDS = [
+    '证件号',
+    '证件号码',
+    '身份证',
+    '身份证号',
+    'QQ',
+    '用户ID',
+    '用户 ID',
+    '支付平台用户ID',
+    '支付平台用户 ID',
+    'UID',
+    'UserID',
+    'User ID',
+    'OpenID',
+    'UnionID',
+    '账号',
+    '帐号',
+    '账户',
+    '手机号',
+    '手机号码',
+    '电话号码',
+    '银行卡',
+    '卡号',
+    '订单号',
+    '流水号',
+    '交易号',
+    '编号',
+]
 
 
 def normalize_label_text(text):
@@ -137,7 +178,7 @@ def build_result_columns(geo_result_keys=None):
     if geo_result_keys is None:
         geo_result_keys = GEO_RESULT_KEYS
     return [
-        'IP', '类型', '使用场景', 'IP属性', '国家/地区',
+        'IP', '页面顶部标签', '反查域名', '类型', '使用场景', 'IP属性', '国家/地区',
     ] + list(geo_result_keys) + [
         'ASN', '企业', 'IP评分',
     ] + INTEL_RESULT_KEYS + [
@@ -189,6 +230,9 @@ def build_append_column_mappings(geo_result_keys=None):
     if geo_result_keys is None:
         geo_result_keys = GEO_RESULT_KEYS
     return [
+        (QUERY_IP_APPEND_COLUMN, 'IP'),
+        ('查询_页面顶部标签', '页面顶部标签'),
+        ('查询_反查域名', '反查域名'),
         ('查询_类型', '类型'),
         ('查询_使用场景', '使用场景'),
         ('查询_IP属性', 'IP属性'),
@@ -235,8 +279,8 @@ def is_excel_column_reference(value):
 
 def setup_driver():
     """配置并启动Chrome浏览器"""
-    chrome_driver_path = os.environ.get('CHROME_DRIVER_PATH', '').strip()
-    chrome_binary_path = os.environ.get('CHROME_BINARY_PATH', '').strip()
+    chrome_driver_path = r''  # 可选：留空时让 Selenium 自动查找 ChromeDriver
+    chrome_binary_path = r''  # 可选：仅在使用独立 Chrome 时填写浏览器路径
 
     options = Options()
     if chrome_binary_path:
@@ -256,13 +300,41 @@ def setup_driver():
     return driver
 
 
+def is_public_ipv4(ip_text):
+    """
+    判断 IPv4 地址是否适合查询 iplark。
+
+    参数:
+        ip_text: 已通过四段数字格式校验的 IPv4 字符串
+
+    返回:
+        True 表示公网可路由 IPv4；私网、回环、链路本地、保留等地址返回 False
+    """
+    try:
+        ip_obj = ipaddress.ip_address(ip_text)
+    except ValueError:
+        return False
+    if ip_obj.version != 4:
+        return False
+    if (
+        ip_obj.is_private or
+        ip_obj.is_loopback or
+        ip_obj.is_link_local or
+        ip_obj.is_multicast or
+        ip_obj.is_reserved or
+        ip_obj.is_unspecified
+    ):
+        return False
+    return ip_obj.is_global
+
+
 def extract_ip_from_hostname(hostname):
-    """从主机名中提取IP地址，如果是域名则返回None"""
-    hostname = hostname.strip()
+    """从主机名中提取公网 IPv4 地址，如果是域名、内网或保留地址则返回 None。"""
+    hostname = str(hostname or '').strip().replace('\t', '')
     ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
-    if re.match(ip_pattern, hostname):
+    if re.fullmatch(ip_pattern, hostname):
         octets = hostname.split('.')
-        if all(0 <= int(octet) <= 255 for octet in octets):
+        if all(octet.isdigit() and 0 <= int(octet) <= 255 for octet in octets) and is_public_ipv4(hostname):
             return hostname
     return None
 
@@ -283,6 +355,76 @@ def safe_find_texts(driver, by, selector):
         return [e.text.strip() for e in elements]
     except Exception:
         return []
+
+
+def dedupe_preserve_order(values):
+    """
+    按原顺序去重文本列表。
+
+    返回:
+        去重后的非空字符串列表
+    """
+    seen = set()
+    result = []
+    for value in values or []:
+        text = re.sub(r'\s+', ' ', str(value or '')).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def looks_like_reverse_hostname(value):
+    """
+    判断页面顶部子标签是否像 DNS 反查主机名。
+
+    返回:
+        True 表示该值适合写入“反查域名”
+    """
+    hostname = str(value or '').strip().rstrip('.')
+    if not hostname or ' ' in hostname or '.' not in hostname:
+        return False
+    if extract_ip_from_hostname(hostname):
+        return False
+
+    labels = hostname.split('.')
+    for label in labels:
+        if not label:
+            return False
+        if len(label) > 63:
+            return False
+        if label.startswith('-') or label.endswith('-'):
+            return False
+        if not re.fullmatch(r'[A-Za-z0-9-]+', label):
+            return False
+
+    top_level_label = labels[-1]
+    return len(top_level_label) >= 2 and any(char.isalpha() for char in top_level_label)
+
+
+def extract_top_sub_tags(driver, result):
+    """
+    提取页面标题下方的子标签，并拆出 DNS 反查主机名。
+
+    参数:
+        driver: Selenium WebDriver
+        result: 待更新的结果字典
+    """
+    sub_tags = dedupe_preserve_order(
+        safe_find_texts(driver, By.CSS_SELECTOR, '#hostname-container .sub-tag')
+    )
+    if not sub_tags:
+        return
+
+    result['页面顶部标签'] = '; '.join(sub_tags)
+
+    reverse_hostnames = [
+        tag for tag in sub_tags
+        if looks_like_reverse_hostname(tag)
+    ]
+    if reverse_hostnames:
+        result['反查域名'] = '; '.join(reverse_hostnames)
 
 
 def extract_geo_locations(driver, result):
@@ -386,6 +528,9 @@ def get_ip_info(driver, ip, retry_count=2):
 
             # 4. 短暂等待动态内容渲染
             time.sleep(1.5)
+
+            # 获取页面标题下方的子标签和反查域名
+            extract_top_sub_tags(driver, result)
 
             # 获取类型标签（家宽/机房等）
             tags = safe_find_texts(driver, By.CSS_SELECTOR, '.ip-tags .tag')
@@ -573,7 +718,12 @@ def read_file_to_dataframes(file_path):
             df = None
             for encoding in ['utf-8', 'gbk', 'gb2312', 'latin1']:
                 try:
-                    df = pd.read_csv(file_path, encoding=encoding)
+                    df = pd.read_csv(
+                        file_path,
+                        encoding=encoding,
+                        dtype=str,
+                        keep_default_na=False
+                    )
                     break
                 except UnicodeDecodeError:
                     continue
@@ -584,10 +734,17 @@ def read_file_to_dataframes(file_path):
                 sheets = pd.read_excel(
                     file_path,
                     sheet_name=None,
+                    dtype=str,
+                    keep_default_na=False,
                     engine='openpyxl' if file_ext == '.xlsx' else 'xlrd'
                 )
             except Exception:
-                sheets = pd.read_excel(file_path, sheet_name=None)
+                sheets = pd.read_excel(
+                    file_path,
+                    sheet_name=None,
+                    dtype=str,
+                    keep_default_na=False
+                )
         else:
             print(f"不支持的文件格式: {file_ext}")
             print("支持的格式: .csv, .xlsx, .xls")
@@ -698,44 +855,73 @@ def normalize_input_path(file_path):
     return os.path.normpath(os.path.expandvars(os.path.expanduser(file_path)))
 
 
-def get_ip_column_name(df, ip_column=None):
+def get_ip_column_names(df, ip_column=None):
     """
-    确定IP所在列的列名
+    确定 IP 所在列的列名列表。
 
     参数:
         df: DataFrame
         ip_column: 用户指定的列
 
     返回:
-        列名 或 None
+        列名列表。自动模式会按列内容扫描，只有出现有效 IPv4 的列才返回。
     """
     if df is None or len(df.columns) == 0:
         print("当前工作表没有可用的列")
-        return None
+        return []
 
     if ip_column is None:
-        for col in df.columns:
-            if 'ip' in str(col).lower():
-                return col
-        return df.columns[-2] if len(df.columns) >= 2 else df.columns[-1]
+        return detect_ip_columns_by_content(df)
 
     ip_column_text = str(ip_column).strip()
     if ip_column_text in df.columns:
-        return ip_column_text
+        return [ip_column_text]
 
     if is_excel_column_reference(ip_column_text):
         col_index = column_letter_to_index(ip_column_text)
         if col_index < len(df.columns):
-            return df.columns[col_index]
+            return [df.columns[col_index]]
         print(f"列 {ip_column_text} 超出范围，文件只有 {len(df.columns)} 列")
-        return None
+        return []
 
     for col in df.columns:
         if ip_column_text.lower() in str(col).lower():
-            return col
+            return [col]
     print(f"未找到列: {ip_column_text}")
     print(f"可用的列: {list(df.columns)}")
-    return None
+    return []
+
+
+def get_ip_column_name(df, ip_column=None):
+    """
+    确定 IP 所在列的第一个列名。
+
+    返回:
+        列名 或 None
+    """
+    ip_column_names = get_ip_column_names(df, ip_column)
+    return ip_column_names[0] if ip_column_names else None
+
+
+def detect_ip_columns_by_content(df):
+    """
+    按单元格内容自动识别包含公网 IPv4 地址的列。
+
+    参数:
+        df: DataFrame
+
+    返回:
+        包含至少一个公网 IPv4 地址的列名列表
+    """
+    ip_column_names = []
+    for column_name in df.columns:
+        for value in df[column_name]:
+            if pd.isna(value):
+                continue
+            if extract_ip_from_hostname(value):
+                ip_column_names.append(column_name)
+                break
+    return ip_column_names
 
 
 def extract_ips_from_column(df, column_name):
@@ -777,14 +963,28 @@ def collect_ips_from_sheets(original_sheets, ip_column=None):
             print(f"工作表 [{sheet_name}] 为空，跳过IP提取")
             continue
 
-        ip_column_name = get_ip_column_name(df_original, ip_column)
-        if ip_column_name is None:
+        ip_column_names = get_ip_column_names(df_original, ip_column)
+        if not ip_column_names:
             print(f"工作表 [{sheet_name}] 未找到IP列，跳过")
             continue
 
-        print(f"工作表 [{sheet_name}] 使用列: {ip_column_name} (索引: {list(df_original.columns).index(ip_column_name)})")
+        column_labels = [
+            f"{column_name} (索引: {list(df_original.columns).index(column_name)})"
+            for column_name in ip_column_names
+        ]
+        print(f"工作表 [{sheet_name}] 使用列: {', '.join(column_labels)}")
 
-        sheet_ips, sheet_ip_to_rows = extract_ips_from_column(df_original, ip_column_name)
+        sheet_ips = []
+        sheet_ip_to_rows = {}
+        for ip_column_name in ip_column_names:
+            column_ips, column_ip_to_rows = extract_ips_from_column(df_original, ip_column_name)
+            for ip in column_ips:
+                if ip not in sheet_ip_to_rows:
+                    sheet_ip_to_rows[ip] = []
+                    sheet_ips.append(ip)
+                for row_idx in column_ip_to_rows[ip]:
+                    if row_idx not in sheet_ip_to_rows[ip]:
+                        sheet_ip_to_rows[ip].append(row_idx)
         if not sheet_ips:
             print(f"工作表 [{sheet_name}] 未找到有效IP")
             continue
@@ -886,6 +1086,169 @@ def clean_cell_value(value):
     return '' if pd.isna(value) else value
 
 
+def normalize_text_preserve_column_name(column_name):
+    """
+    规范化列名用于判断是否需要按文本保留。
+
+    返回:
+        小写并去除空白、下划线、连字符和常见括号后的列名
+    """
+    column_text = str(column_name or '').strip().casefold()
+    return re.sub(r'[\s_\-()（）]+', '', column_text)
+
+
+def is_text_preservation_column(column_name):
+    """
+    判断列是否应按 Excel 文本列写出。
+
+    账号、证件号、QQ、用户 ID 等标识符即使全是数字，也不能当数值处理。
+    """
+    column_text = str(column_name or '').strip()
+    if column_text in TEXT_PRESERVE_EXACT_COLUMNS:
+        return True
+
+    normalized = normalize_text_preserve_column_name(column_text)
+    if normalized in {
+        normalize_text_preserve_column_name(name)
+        for name in TEXT_PRESERVE_EXACT_COLUMNS
+    }:
+        return True
+
+    for keyword in TEXT_PRESERVE_COLUMN_KEYWORDS:
+        keyword_normalized = normalize_text_preserve_column_name(keyword)
+        if keyword_normalized and keyword_normalized in normalized:
+            return True
+
+    return False
+
+
+def looks_like_long_numeric_identifier(value):
+    """
+    判断值是否像长数字标识符。
+
+    返回:
+        True 表示该值不适合作为 Excel 数值写出
+    """
+    if value is None or pd.isna(value):
+        return False
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return len(str(abs(value))) >= LONG_NUMERIC_TEXT_MIN_DIGITS
+    if isinstance(value, float):
+        if not value.is_integer():
+            return False
+        return len(f'{abs(value):.0f}') >= LONG_NUMERIC_TEXT_MIN_DIGITS
+
+    value_text = str(value).strip()
+    if not value_text:
+        return False
+    value_text = value_text.lstrip("'").replace('\t', '').replace(' ', '')
+
+    if re.fullmatch(r'[+-]?\d+', value_text):
+        digits = value_text.lstrip('+-')
+        return (
+            len(digits) >= LONG_NUMERIC_TEXT_MIN_DIGITS or
+            (digits.startswith('0') and len(digits) > 1)
+        )
+    return bool(re.fullmatch(r'[+-]?\d+(?:\.\d+)?[eE][+-]?\d+', value_text))
+
+
+def column_has_long_numeric_identifier_values(series):
+    """
+    判断列中是否出现长数字标识符值。
+
+    返回:
+        True 表示整列写出时应使用文本格式
+    """
+    if series is None:
+        return False
+    return any(looks_like_long_numeric_identifier(value) for value in series)
+
+
+def stringify_text_preserved_value(value):
+    """
+    将文本保真列的值转成适合写入 Excel 的字符串。
+
+    返回:
+        字符串；空值返回空字符串
+    """
+    if value is None or pd.isna(value):
+        return ''
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return f'{value:.0f}'
+    return str(value)
+
+
+def prepare_dataframe_for_excel(df):
+    """
+    写入 Excel 前准备 DataFrame，并标记需要设置文本格式的列。
+
+    返回:
+        (处理后的 DataFrame, 需要按文本格式写出的列名集合)
+    """
+    if df is None:
+        return df, set()
+
+    df_output = df.copy()
+    text_columns = set()
+    for column in df_output.columns:
+        if (
+            is_text_preservation_column(column) or
+            column_has_long_numeric_identifier_values(df_output[column])
+        ):
+            text_columns.add(column)
+
+    for column in text_columns:
+        df_output[column] = df_output[column].map(stringify_text_preserved_value)
+
+    return df_output, text_columns
+
+
+def apply_excel_text_formats(writer, sheet_name, df, text_columns, index=False):
+    """
+    对已写出的 Excel 工作表设置文本列格式。
+
+    注意:
+        必须配合 prepare_dataframe_for_excel 把值转成字符串；仅设置 number_format
+        无法修复已经作为数值写出的长数字。
+    """
+    if not text_columns:
+        return
+
+    worksheet = writer.sheets.get(sheet_name)
+    if worksheet is None:
+        return
+
+    index_offset = 1 if index else 0
+    for column in text_columns:
+        if column not in df.columns:
+            continue
+        excel_column_index = list(df.columns).index(column) + 1 + index_offset
+        excel_column_letter = get_column_letter(excel_column_index)
+        for cell in worksheet[excel_column_letter]:
+            cell.number_format = EXCEL_TEXT_NUMBER_FORMAT
+
+
+def write_dataframe_to_excel(writer, df, sheet_name, index=False):
+    """
+    写出 DataFrame，并对标识符类列做 Excel 文本保真处理。
+    """
+    df_output, text_columns = prepare_dataframe_for_excel(df)
+    df_output.to_excel(writer, index=index, sheet_name=sheet_name)
+    apply_excel_text_formats(
+        writer,
+        sheet_name,
+        df_output,
+        text_columns,
+        index=index
+    )
+
+
 def is_query_append_column(column_name):
     """
     判断列是否属于原表回填的查询结果列。
@@ -894,7 +1257,11 @@ def is_query_append_column(column_name):
         True 表示该列不是原始输入列
     """
     column_text = str(column_name)
-    return column_text.startswith('查询_') or column_text in INTEL_RESULT_KEYS
+    return (
+        column_text == QUERY_IP_APPEND_COLUMN or
+        column_text.startswith('查询_') or
+        column_text in INTEL_RESULT_KEYS
+    )
 
 
 def collect_geo_result_keys_from_augmented_columns(columns):
@@ -961,7 +1328,12 @@ def get_history_ip_column_names(df, ip_column=None):
     source_columns = [col for col in df.columns if not is_query_append_column(col)]
 
     if ip_column is None:
-        return [col for col in source_columns if 'ip' in str(col).lower()]
+        ip_columns = [col for col in source_columns if 'ip' in str(col).lower()]
+        if ip_columns:
+            return ip_columns
+        if QUERY_IP_APPEND_COLUMN in df.columns:
+            return [QUERY_IP_APPEND_COLUMN]
+        return []
 
     ip_column_text = str(ip_column).strip()
     if ip_column_text in df.columns:
@@ -1106,7 +1478,12 @@ def read_query_results_excel(file_path, ip_column=None):
         results = []
         recognized_sheet_count = 0
         for sheet_name in sheet_names:
-            df = pd.read_excel(excel_file, sheet_name=sheet_name)
+            df = pd.read_excel(
+                excel_file,
+                sheet_name=sheet_name,
+                dtype=str,
+                keep_default_na=False
+            )
             sheet_results, recognized = read_history_result_sheet(
                 df,
                 sheet_name,
@@ -1135,7 +1512,7 @@ def get_retry_output_prefix(retry_from):
     从历史结果文件名提取 retry 输出前缀。
 
     返回:
-        文件名前缀，例如 input_ip_info_result_... -> input_
+        文件名前缀，例如 test_ip_info_result_... -> test_
     """
     if not retry_from:
         return ''
@@ -1185,7 +1562,12 @@ def read_augmented_history_sheets(file_path):
         sheets = {}
         has_augmented_columns = False
         for sheet_name in data_sheet_names:
-            df = pd.read_excel(excel_file, sheet_name=sheet_name)
+            df = pd.read_excel(
+                excel_file,
+                sheet_name=sheet_name,
+                dtype=str,
+                keep_default_na=False
+            )
             sheets[sheet_name] = df
             if any(is_query_append_column(column) for column in df.columns):
                 has_augmented_columns = True
@@ -1297,7 +1679,12 @@ def save_augmented_retry_workbook(history_sheets, ip_to_rows, ip_to_result, outp
 
     with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
         for sheet_name, df_output in output_sheets.items():
-            df_output.to_excel(writer, index=False, sheet_name=sheet_name)
+            write_dataframe_to_excel(
+                writer,
+                df_output,
+                sheet_name=sheet_name,
+                index=False
+            )
 
 
 def build_ip_to_result(results):
@@ -1432,8 +1819,18 @@ def save_query_results(results, output_file):
     df_field_descriptions = build_result_field_description_rows(geo_result_keys)
 
     with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
-        df_result.to_excel(writer, index=False, sheet_name='查询结果')
-        df_field_descriptions.to_excel(writer, index=False, sheet_name='输出字段说明')
+        write_dataframe_to_excel(
+            writer,
+            df_result,
+            sheet_name='查询结果',
+            index=False
+        )
+        write_dataframe_to_excel(
+            writer,
+            df_field_descriptions,
+            sheet_name='输出字段说明',
+            index=False
+        )
 
 
 def save_augmented_workbook(original_sheets, ip_to_rows, ip_to_result, output_file):
@@ -1450,17 +1847,22 @@ def save_augmented_workbook(original_sheets, ip_to_rows, ip_to_result, output_fi
     geo_result_keys = collect_geo_result_keys(list(ip_to_result.values()))
     append_column_mappings = build_append_column_mappings(geo_result_keys)
     append_columns = [column for column, _ in append_column_mappings]
+    sheets_with_results = set()
+    for row_indices in ip_to_rows.values():
+        for sheet_name, _ in row_indices:
+            sheets_with_results.add(sheet_name)
 
     output_sheets = {}
     for sheet_name, df_original in original_sheets.items():
         if df_original is None:
             continue
         df_output = df_original.copy()
-        for column in append_columns:
-            if column not in df_output.columns:
-                df_output[column] = ''
-            else:
-                df_output[column] = df_output[column].astype(object)
+        if sheet_name in sheets_with_results:
+            for column in append_columns:
+                if column not in df_output.columns:
+                    df_output[column] = ''
+                else:
+                    df_output[column] = df_output[column].astype(object)
         output_sheets[sheet_name] = df_output
 
     for ip, row_indices in ip_to_rows.items():
@@ -1476,7 +1878,12 @@ def save_augmented_workbook(original_sheets, ip_to_rows, ip_to_result, output_fi
 
     with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
         for sheet_name, df_output in output_sheets.items():
-            df_output.to_excel(writer, index=False, sheet_name=sheet_name)
+            write_dataframe_to_excel(
+                writer,
+                df_output,
+                sheet_name=sheet_name,
+                index=False
+            )
 
 
 def merge_query_results(existing_results, retry_results):
@@ -1847,7 +2254,7 @@ def main():
 
     # IP地址所在列配置
     # 可选值:
-    #   - None     : 自动检测（查找列名包含'ip'的列）
+    #   - None     : 自动检测（扫描各列内容，提取公网 IPv4 地址）
     #   - 'A'      : 使用A列（第1列）
     #   - 'B'      : 使用B列（第2列）
     #   - 'H'      : 使用H列（第8列）
